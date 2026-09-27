@@ -33,14 +33,20 @@
 #define IMX681_REG_EXPOSURE	CCI_REG24(0x0229)
 #define IMX681_REG_ANALOG_GAIN	CCI_REG16(0x0204)
 #define IMX681_REG_DIGITAL_GAIN	CCI_REG16(0x020e)
-#define IMX681_REG_FRAME_LENGTH	CCI_REG16(0x0340)
+#define IMX681_REG_FRAME_LENGTH	CCI_REG24(0x033d)
 
 #define IMX681_WIDTH		3840
 #define IMX681_HEIGHT		2640
-#define IMX681_LINE_LENGTH	6752
-#define IMX681_FRAME_LENGTH_DEF	2708
+/*
+ * The mode's line is 6752 clocks of the 720 MHz pixel array clock (9.378 us).
+ * The timing controls count in the 548.57 MHz CSI-2 pixel rate below, in which
+ * the same line is 5144 pixels.
+ */
+#define IMX681_LINE_LENGTH	5144
+/* The mode's frame length, 3554 lines: 30 fps, and the shortest frame used. */
+#define IMX681_FRAME_LENGTH_DEF	3554
 #define IMX681_FRAME_LENGTH_MAX	0xffff
-#define IMX681_EXPOSURE_MARGIN	48
+#define IMX681_EXPOSURE_MARGIN	8
 #define IMX681_EXPOSURE_DEF	1600
 #define IMX681_AGAIN_MAX	960	/* gain = 1024 / (1024 - code) */
 #define IMX681_DGAIN_DEF	0x0100
@@ -235,7 +241,7 @@ static int imx681_init_controls(struct imx681 *sensor)
 
 	sensor->vblank_ctrl =
 		v4l2_ctrl_new_std(hdl, ops, V4L2_CID_VBLANK,
-				  IMX681_EXPOSURE_MARGIN,
+				  IMX681_FRAME_LENGTH_DEF - IMX681_HEIGHT,
 				  IMX681_FRAME_LENGTH_MAX - IMX681_HEIGHT, 1,
 				  IMX681_FRAME_LENGTH_DEF - IMX681_HEIGHT);
 	sensor->expo_ctrl =
