@@ -5,8 +5,9 @@
  * These tables are an independently written representation of runtime I2C
  * transactions observed on the author's own hardware.  The observed
  * stream-start order is global initialization, followed by the selected mode.
- * Mode: 3840x2640 RAW10, LLP 6752, VT pixel clock 548571428 Hz
- * (~30 fps at FLL 2708), ONE C-PHY TRIO at 2406 Msym/s.
+ * Mode: 3840x2640 RAW10, LLP 6752 at a 720 MHz VT pixel clock, FLL 3554
+ * (0x033d, 24 bit): 30 fps; ONE C-PHY TRIO at 2406 Msym/s, a 548571428 Hz
+ * CSI-2 pixel rate.
  */
 #ifndef __IMX681_TABLES_H
 #define __IMX681_TABLES_H
