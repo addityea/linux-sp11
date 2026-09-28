@@ -372,7 +372,7 @@ static int imx681_start_streaming(struct imx681 *sensor)
 	if (ret)
 		goto err_rpm_put;
 
-	ret = __v4l2_ctrl_handler_setup(&sensor->ctrl_handler);
+	ret = v4l2_ctrl_handler_setup(&sensor->ctrl_handler);
 	if (ret)
 		goto err_rpm_put;
 
