@@ -24,6 +24,8 @@ static DEFINE_MUTEX(profile_lock);
 /* Serialize registration and sysfs updates without blocking sysfs callbacks. */
 static DEFINE_MUTEX(profile_registration_lock);
 static LIST_HEAD(profile_handlers);
+static struct kobject *legacy_kobj;
+static bool own_legacy_kobj;
 
 struct platform_profile_handler {
 	struct list_head node;
@@ -243,7 +245,7 @@ static ssize_t profile_store(struct device *dev,
 			return ret;
 	}
 
-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
+	sysfs_notify(legacy_kobj, NULL, "platform_profile");
 
 	return count;
 }
@@ -458,7 +460,7 @@ static ssize_t platform_profile_store(struct kobject *kobj,
 			return ret;
 	}
 
-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
+	sysfs_notify(legacy_kobj, NULL, "platform_profile");
 
 	return count;
 }
@@ -493,7 +495,7 @@ void platform_profile_notify(struct device *dev)
 	scoped_cond_guard(mutex_intr, return, &profile_lock) {
 		_notify_class_profile(dev, NULL);
 	}
-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
+	sysfs_notify(legacy_kobj, NULL, "platform_profile");
 }
 EXPORT_SYMBOL_GPL(platform_profile_notify);
 
@@ -540,7 +542,7 @@ int platform_profile_cycle(void)
 			return err;
 	}
 
-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
+	sysfs_notify(legacy_kobj, NULL, "platform_profile");
 
 	return 0;
 }
@@ -615,9 +617,9 @@ struct device *platform_profile_register(struct device *dev, const char *name,
 	scoped_guard(mutex, &profile_lock)
 		list_add_tail(&to_pprof_handler(ppdev)->node, &profile_handlers);
 
-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
+	sysfs_notify(legacy_kobj, NULL, "platform_profile");
 
-	err = sysfs_update_group(acpi_kobj, &platform_profile_group);
+	err = sysfs_update_group(legacy_kobj, &platform_profile_group);
 	if (err)
 		goto cleanup_cur;
 
@@ -657,8 +659,8 @@ void platform_profile_remove(struct device *dev)
 	ida_free(&platform_profile_ida, pprof->minor);
 	device_unregister(&pprof->dev);
 
-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
-	sysfs_update_group(acpi_kobj, &platform_profile_group);
+	sysfs_notify(legacy_kobj, NULL, "platform_profile");
+	sysfs_update_group(legacy_kobj, &platform_profile_group);
 }
 EXPORT_SYMBOL_GPL(platform_profile_remove);
 
@@ -706,24 +708,38 @@ static int __init platform_profile_init(void)
 {
 	int err;
 
-	if (acpi_disabled)
-		return -EOPNOTSUPP;
+	/*
+	 * On devicetree boots (acpi_disabled) there is no acpi_kobj. Keep the class
+	 * interface and provide the legacy /sys/firmware/acpi/platform_profile file on our
+	 * own kobject, because power-profiles-daemon only reads the legacy file.
+	 */
+	legacy_kobj = acpi_disabled ? NULL : acpi_kobj;
+	if (!legacy_kobj) {
+		legacy_kobj = kobject_create_and_add("acpi", firmware_kobj);
+		if (!legacy_kobj)
+			return -ENOMEM;
+		own_legacy_kobj = true;
+	}
 
 	err = class_register(&platform_profile_class);
 	if (err)
 		return err;
 
-	err = sysfs_create_group(acpi_kobj, &platform_profile_group);
+	err = sysfs_create_group(legacy_kobj, &platform_profile_group);
 	if (err)
 		class_unregister(&platform_profile_class);
+	if (err && own_legacy_kobj)
+		kobject_put(legacy_kobj);
 
 	return err;
 }
 
 static void __exit platform_profile_exit(void)
 {
-	sysfs_remove_group(acpi_kobj, &platform_profile_group);
+	sysfs_remove_group(legacy_kobj, &platform_profile_group);
 	class_unregister(&platform_profile_class);
+	if (own_legacy_kobj)
+		kobject_put(legacy_kobj);
 }
 module_init(platform_profile_init);
 module_exit(platform_profile_exit);
