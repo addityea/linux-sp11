@@ -4627,18 +4627,19 @@ static int g6ts_suspend(struct device *dev)
 static int g6ts_resume(struct device *dev)
 {
 	struct g6ts *ts = dev_get_drvdata(dev);
-	int ret;
 
+	/*
+	 * The recovery work's hardware path powers the controller off and on
+	 * again (g6ts_full_reinitialize_locked()), so a power-on here would be
+	 * undone 100 ms later; it only held the resume phase for the 800 ms of
+	 * delays in g6ts_power_on().
+	 */
 	mutex_lock(&ts->io_lock);
 	ts->fatal_transport_error = false;
 	ts->recovery_fail_streak = 0;
 	ts->recovery_path = G6TS_RECOVERY_HARDWARE;
-	ret = g6ts_power_on(ts);
-	if (!ret)
-		WRITE_ONCE(ts->quiescing, false);
+	WRITE_ONCE(ts->quiescing, false);
 	mutex_unlock(&ts->io_lock);
-	if (ret)
-		return ret;
 
 	if (!g6ts_ipts_irq_cadence)
 		enable_irq(ts->interrupt_irq);
