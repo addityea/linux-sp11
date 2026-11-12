@@ -335,6 +335,11 @@ static bool _dpu_rm_check_lm_and_get_connected_blks(struct dpu_rm *rm,
 	if (!topology->num_dspp)
 		return true;
 
+	if (!lm_cfg->dspp) {
+		DPU_DEBUG("LM_%d has no DSPP\n", lm_idx);
+		return false;
+	}
+
 	idx = lm_cfg->dspp - DSPP_0;
 	if (idx < 0 || idx >= ARRAY_SIZE(rm->dspp_blks) || !rm->dspp_blks[idx]) {
 		DPU_ERROR("LM_%d, invalid DSPP_%d\n", lm_idx, idx);
@@ -356,15 +361,26 @@ static int _dpu_rm_reserve_lms(struct dpu_rm *rm,
 			       struct msm_display_topology *topology)
 
 {
+	struct msm_display_topology lm_topology = *topology;
 	int lm_idx[MAX_BLOCKS];
 	int pp_idx[MAX_BLOCKS];
 	int dspp_idx[MAX_BLOCKS] = {0};
-	int i, lm_count = 0;
+	int i, lm_count;
 
 	if (!topology->num_lm) {
 		DPU_ERROR("zero LMs in topology\n");
 		return -EINVAL;
 	}
+
+	/*
+	 * Look for mixers with a free DSPP first, also for a topology that
+	 * asks for none, and reserve the DSPPs with them: a CTM or a gamma LUT
+	 * set later then has its DSPPs and needs no mode set to get them.
+	 */
+	lm_topology.num_dspp = topology->num_lm;
+
+retry:
+	lm_count = 0;
 
 	/* Find a primary mixer */
 	for (i = 0; i < ARRAY_SIZE(rm->mixer_blks) &&
@@ -381,7 +397,7 @@ static int _dpu_rm_reserve_lms(struct dpu_rm *rm,
 
 		if (!_dpu_rm_check_lm_and_get_connected_blks(rm, global_state,
 				crtc_id, i, &pp_idx[lm_count],
-				&dspp_idx[lm_count], topology)) {
+				&dspp_idx[lm_count], &lm_topology)) {
 			continue;
 		}
 
@@ -401,7 +417,7 @@ static int _dpu_rm_reserve_lms(struct dpu_rm *rm,
 			if (!_dpu_rm_check_lm_and_get_connected_blks(rm,
 					global_state, crtc_id, j,
 					&pp_idx[lm_count], &dspp_idx[lm_count],
-					topology)) {
+					&lm_topology)) {
 				continue;
 			}
 
@@ -411,6 +427,12 @@ static int _dpu_rm_reserve_lms(struct dpu_rm *rm,
 	}
 
 	if (lm_count != topology->num_lm) {
+		if (lm_topology.num_dspp && !topology->num_dspp) {
+			/* No such mixers are left: do without the DSPPs */
+			lm_topology.num_dspp = 0;
+			goto retry;
+		}
+
 		DPU_DEBUG("unable to find appropriate mixers\n");
 		return -ENAVAIL;
 	}
@@ -418,8 +440,8 @@ static int _dpu_rm_reserve_lms(struct dpu_rm *rm,
 	for (i = 0; i < lm_count; i++) {
 		global_state->mixer_to_crtc_id[lm_idx[i]] = crtc_id;
 		global_state->pingpong_to_crtc_id[pp_idx[i]] = crtc_id;
-		global_state->dspp_to_crtc_id[dspp_idx[i]] =
-			topology->num_dspp ? crtc_id : 0;
+		if (lm_topology.num_dspp)
+			global_state->dspp_to_crtc_id[dspp_idx[i]] = crtc_id;
 
 		trace_dpu_rm_reserve_lms(lm_idx[i] + LM_0, crtc_id,
 					 pp_idx[i] + PINGPONG_0);
