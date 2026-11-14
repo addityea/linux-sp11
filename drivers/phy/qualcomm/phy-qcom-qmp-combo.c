@@ -4442,7 +4442,21 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
 err_disable_clocks:
 	clk_bulk_disable_unprepare(qmp->num_clks, qmp->clks);
 err_assert_reset:
-	reset_control_bulk_assert(cfg->num_resets, qmp->resets);
+	/*
+	 * The acquisition error in ret is the caller's result and must be
+	 * preserved: cleanup failure latches quarantine but must never
+	 * turn a failed acquire into a success return (which would let a
+	 * DP initializer reach dp_aux_init against powered-down hardware).
+	 */
+	{
+		int cleanup = reset_control_bulk_assert(cfg->num_resets, qmp->resets);
+
+		if (cleanup) {
+			/* Unwind failed mid-ladder: reset state uncertain, quarantine. */
+			qmp->quarantine_error = cleanup;
+			qmp->quarantine_cleanup = true;
+		}
+	}
 err_disable_regulators:
 	qmp_combo_disable_regulators(qmp);
 err_decrement_count:
