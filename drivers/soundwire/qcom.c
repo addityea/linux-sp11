@@ -578,25 +578,6 @@ static int qcom_swrm_cmd_fifo_rd_cmd(struct qcom_swrm_ctrl *ctrl,
 	return SDW_CMD_IGNORED;
 }
 
-static int qcom_swrm_get_alert_slave_dev_num(struct qcom_swrm_ctrl *ctrl)
-{
-	u32 val, status;
-	int dev_num;
-
-	ctrl->reg_read(ctrl, SWRM_MCP_SLV_STATUS, &val);
-
-	for (dev_num = 1; dev_num <= SDW_MAX_DEVICES; dev_num++) {
-		status = (val >> (dev_num * SWRM_MCP_SLV_STATUS_SZ));
-
-		if ((status & SWRM_MCP_SLV_STATUS_MASK) == SDW_SLAVE_ALERT) {
-			ctrl->status[dev_num] = status & SWRM_MCP_SLV_STATUS_MASK;
-			return dev_num;
-		}
-	}
-
-	return -EINVAL;
-}
-
 static void qcom_swrm_get_device_status(struct qcom_swrm_ctrl *ctrl)
 {
 	u32 val;
@@ -612,6 +593,34 @@ static void qcom_swrm_get_device_status(struct qcom_swrm_ctrl *ctrl)
 		s &= SWRM_MCP_SLV_STATUS_MASK;
 		ctrl->status[i] = s;
 	}
+}
+
+static int qcom_swrm_get_alert_slave_dev_num(struct qcom_swrm_ctrl *ctrl)
+{
+	int dev_num, alert_dev = -EINVAL;
+
+	/*
+	 * In multi-slave topologies (two WSA884x smart amplifiers sharing one
+	 * SoundWire bus on the Surface Pro 11), decoding SWRM_MCP_SLV_STATUS
+	 * across all devices is mandatory before handing status to the
+	 * SoundWire core. If only the alerting dev_num slot is written to
+	 * ctrl->status, sibling slaves stay 0 (SDW_SLAVE_UNATTACHED), and
+	 * sdw_handle_slave_status() then falsely demotes the sibling, tearing
+	 * down its port routing and permanently muting that speaker until
+	 * reboot. This is the root cause of one-sided audio after parity
+	 * alerts on wsa884x.
+	 *
+	 * Adapted from Jesse Casco (FixItFoundry) soundwire-qcom alert-status
+	 * fix for the same bug on WSA8845 multi-slave boards.
+	 */
+	qcom_swrm_get_device_status(ctrl);
+
+	for (dev_num = 1; dev_num <= SDW_MAX_DEVICES; dev_num++) {
+		if (ctrl->status[dev_num] == SDW_SLAVE_ALERT && alert_dev < 0)
+			alert_dev = dev_num;
+	}
+
+	return alert_dev;
 }
 
 static void qcom_swrm_set_slave_dev_num(struct sdw_bus *bus,
