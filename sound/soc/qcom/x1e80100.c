@@ -48,7 +48,7 @@ static int x1e80100_snd_init(struct snd_soc_pcm_runtime *rtd)
 		 * its amplifiers' OCP, PBR and thermal protection (the wsa884x
 		 * 2S/4 ohm profile) are relied on instead.
 		 */
-		if (of_machine_is_compatible("microsoft,denali")) {
+		if (of_machine_is_compatible("microsoft,denali-oled")) {
 			digital_max = 84;
 			pa_max = 12;
 		} else {

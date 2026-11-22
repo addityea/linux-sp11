@@ -1636,12 +1636,11 @@ static void wsa884x_init(struct wsa884x_priv *wsa884x)
 		wsa884x->supply_config = supply_config;
 		/*
 		 * The 2S settings below include the Surface Pro 11's 4 ohm
-		 * load policy (OLED and LCD models alike), so other boards
-		 * keep the upstream 1S defaults until their speakers are
-		 * characterised.
+		 * load policy, so other boards keep the upstream 1S defaults
+		 * until their speakers are characterised.
 		 */
 		if (supply_config == WSA884X_SUPPLY_2S &&
-		    !of_machine_is_compatible("microsoft,denali")) {
+		    !of_machine_is_compatible("microsoft,denali-oled")) {
 			wsa884x->supply_config = WSA884X_SUPPLY_1S;
 			dev_info(wsa884x->dev,
 				 "VPHX supply configuration is 2S; retaining upstream 1S defaults on this board\n");
