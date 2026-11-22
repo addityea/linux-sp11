@@ -770,7 +770,6 @@ struct wsa884x_priv {
 	unsigned int pa_faults;
 	unsigned long pa_fault_start;
 	unsigned int supply_config;
-	bool supply_detected;
 };
 
 enum wsa884x_supply_config {
@@ -1626,14 +1625,14 @@ static void wsa884x_apply_supply_config(struct wsa884x_priv *wsa884x)
 			   WSA884X_TOP_CTRL1_OCP_LOWVBAT_ITH_EN_MASK, 0);
 }
 
-/*
- * VPHX_SYS_EN_STATUS can read 0 or other values that name no configuration
- * when the amplifier attaches again after the bus or the amplifier powered
- * down, so the first reading that names one is kept.
- */
-static void wsa884x_detect_supply(struct wsa884x_priv *wsa884x)
+static void wsa884x_init(struct wsa884x_priv *wsa884x)
 {
+	unsigned int wo_ctl_0;
 	unsigned int supply_config;
+	unsigned int variant = 0;
+
+	if (!regmap_read(wsa884x->regmap, WSA884X_OTP_REG_0, &variant))
+		variant = variant & WSA884X_OTP_REG_0_ID_MASK;
 
 	if (regmap_read(wsa884x->regmap, WSA884X_VPHX_SYS_EN_STATUS,
 			&supply_config)) {
@@ -1642,8 +1641,6 @@ static void wsa884x_detect_supply(struct wsa884x_priv *wsa884x)
 			 "cannot read VPHX supply configuration; retaining 1S defaults\n");
 	} else {
 		wsa884x->supply_config = supply_config;
-		wsa884x->supply_detected = supply_config >= WSA884X_SUPPLY_1S &&
-					   supply_config <= WSA884X_SUPPLY_3S;
 		/*
 		 * The 2S settings below include the Surface Pro 11's 4 ohm
 		 * load policy (OLED and LCD models alike), so other boards
@@ -1663,18 +1660,6 @@ static void wsa884x_detect_supply(struct wsa884x_priv *wsa884x)
 				 "unsupported VPHX supply configuration %#x; retaining upstream defaults\n",
 				 supply_config);
 	}
-}
-
-static void wsa884x_init(struct wsa884x_priv *wsa884x)
-{
-	unsigned int wo_ctl_0;
-	unsigned int variant = 0;
-
-	if (!regmap_read(wsa884x->regmap, WSA884X_OTP_REG_0, &variant))
-		variant = variant & WSA884X_OTP_REG_0_ID_MASK;
-
-	if (!wsa884x->supply_detected)
-		wsa884x_detect_supply(wsa884x);
 
 	regmap_multi_reg_write(wsa884x->regmap, wsa884x_reg_init,
 			       ARRAY_SIZE(wsa884x_reg_init));
