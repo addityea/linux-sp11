@@ -714,13 +714,11 @@ int audioreach_send_cmd_sync_timeout(struct device *dev, gpr_device_t *gdev,
 
 	if (!rc) {
 		if (!quiet)
-			dev_err(dev, "CMD timeout for [%x] opcode
-", hdr->opcode);
+			dev_err(dev, "CMD timeout for [%x] opcode\n", hdr->opcode);
 		rc = -ETIMEDOUT;
 	} else if (result->status > 0) {
 		if (!quiet)
-			dev_err(dev, "DSP returned error[%x] %x
-", hdr->opcode, result->status);
+			dev_err(dev, "DSP returned error[%x] %x\n", hdr->opcode, result->status);
 		if (result->status == AUDIOREACH_DSP_EUNSUPPORTED)
 			rc = -EOPNOTSUPP;
 		else

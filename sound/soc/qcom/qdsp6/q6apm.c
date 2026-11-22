@@ -583,8 +583,7 @@ static int q6apm_get_apm_state(struct q6apm *apm)
 		ret = q6apm_send_cmd_sync_timeout(apm, pkt, APM_CMD_RSP_GET_SPF_STATE,
 						  msecs_to_jiffies(100), true);
 		if (!ret && apm->state) {
-			dev_info(apm->dev, "APM service ready (state: 0x%x)
-", apm->state);
+			dev_info(apm->dev, "APM service ready (state: 0x%x)\n", apm->state);
 			return apm->state;
 		}
 
@@ -593,8 +592,7 @@ static int q6apm_get_apm_state(struct q6apm *apm)
 	}
 
 	if (!apm->state)
-		dev_err(apm->dev, "APM service did not become ready (state: 0x%x)
-", apm->state);
+		dev_err(apm->dev, "APM service did not become ready (state: 0x%x)\n", apm->state);
 
 	return apm->state;
 }
