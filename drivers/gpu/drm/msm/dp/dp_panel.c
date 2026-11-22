@@ -12,6 +12,7 @@
 #include <drm/drm_of.h>
 #include <drm/drm_print.h>
 
+#include <linux/dmi.h>
 #include <linux/io.h>
 #include <linux/types.h>
 #include <linux/unaligned.h>
