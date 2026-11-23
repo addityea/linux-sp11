@@ -741,16 +741,36 @@ int msm_dp_display_atomic_check(struct msm_dp *msm_dp_display,
 
 	guard(mutex)(&dp->plugged_lock);
 
-	if (!dp->panel->link_caps_valid)
+	if (!dp->panel->link_caps_valid) {
+		pr_err_ratelimited("hermes-hdr: reject: link_caps_valid=0\n");
 		return -EINVAL;
+	}
 
 	ret = msm_dp_utils_pack_hdr_sdp(conn_state, &state->hdr_sdp);
-	if (ret)
+	if (ret) {
+		DRM_ERROR("hermes-hdr: reject: pack_hdr_sdp ret=%d\n", ret);
 		return ret;
+	}
 
 	state->hdr_enabled = !!conn_state->hdr_output_metadata;
-	if (state->hdr_enabled && dp->panel->hw_revision < DP_HW_VERSION_1_0)
-		return -EINVAL;
+	if (state->hdr_enabled) {
+		static bool hermes_logged;
+
+		if (!hermes_logged) {
+			hermes_logged = true;
+			DRM_ERROR("hermes-hdr: first HDR commit: hw_rev=0x%x vsc_sdp=%d caps_valid=%d max_bpc=%u eotf_db2=0x%x\n",
+				  dp->panel->hw_revision,
+				  dp->panel->vsc_sdp_supported,
+				  dp->panel->link_caps_valid,
+				  conn_state->max_requested_bpc,
+				  state->hdr_sdp.db[2]);
+		}
+		if (dp->panel->hw_revision < DP_HW_VERSION_1_0) {
+			pr_err_ratelimited("hermes-hdr: reject: hw_rev=0x%x too old\n",
+					   dp->panel->hw_revision);
+			return -EINVAL;
+		}
+	}
 
 	bpp = msm_dp_utils_select_bpp(info->bpc, conn_state->max_requested_bpc ?: 8,
 				      clock, dp->panel->link_info.rate,
@@ -758,8 +778,12 @@ int msm_dp_display_atomic_check(struct msm_dp *msm_dp_display,
 				      drm_mode_is_420_only(info, mode),
 				      state->hdr_enabled && state->hdr_sdp.db[2] !=
 				      HDMI_EOTF_TRADITIONAL_GAMMA_SDR);
-	if (bpp < 0)
+	if (bpp < 0) {
+		DRM_ERROR("hermes-hdr: reject: bpp select ret=%d clock=%u link_rate=%u lanes=%u hdr=%d\n",
+			  bpp, clock, dp->panel->link_info.rate,
+			  dp->panel->link_info.num_lanes, state->hdr_enabled);
 		return bpp;
+	}
 
 	state->bpp = bpp;
 	state->colorspace = conn_state->colorspace;
@@ -769,11 +793,18 @@ int msm_dp_display_atomic_check(struct msm_dp *msm_dp_display,
 	if (!state->vsc_enabled)
 		return 0;
 
-	if (dp->panel->link_caps_valid && !dp->panel->vsc_sdp_supported)
+	if (dp->panel->link_caps_valid && !dp->panel->vsc_sdp_supported) {
+		pr_err_ratelimited("hermes-hdr: reject: vsc_sdp_supported=0 (colorspace=%llu)\n",
+				   (unsigned long long)conn_state->colorspace);
 		return -EINVAL;
+	}
 
-	return msm_dp_utils_pack_vsc_sdp(&state->vsc_sdp, state->colorspace,
+	ret = msm_dp_utils_pack_vsc_sdp(&state->vsc_sdp, state->colorspace,
 					bpp / 3, drm_mode_is_420_only(info, mode));
+	if (ret)
+		DRM_ERROR("hermes-hdr: reject: pack_vsc_sdp ret=%d colorspace=%llu bpp=%d\n",
+			  ret, (unsigned long long)state->colorspace, bpp);
+	return ret;
 }
 
 static int msm_dp_display_prepare(struct msm_dp_display_private *dp)

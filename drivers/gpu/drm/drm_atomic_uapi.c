@@ -970,6 +970,8 @@ static int drm_atomic_connector_set_property(struct drm_connector *connector,
 			       "[CONNECTOR:%d:%s] unknown property [PROP:%d:%s]\n",
 			       connector->base.id, connector->name,
 			       property->base.id, property->name);
+		pr_err_ratelimited("hermes-atomic: CONNECTOR %s rejects unknown property %s (id %u)\n",
+				   connector->name, property->name, property->base.id);
 		return -EINVAL;
 	}
 
