@@ -127,13 +127,9 @@ static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel,
 		if (rc) {
 			/* Retry discovery rather than caching a failed optional read. */
 			*caps_valid = false;
-			DRM_INFO("hermes-hdr: rx_feature read failed rc=%d, will retry\n", rc);
 		} else {
 			msm_dp_panel->vsc_sdp_supported =
 				rx_feature & DP_VSC_SDP_EXT_FOR_COLORIMETRY_SUPPORTED;
-			DRM_INFO("hermes-hdr: discovery: dpcd_rev=0x%02x rx_feature=0x%02x vsc_sdp=%d\n",
-				 dpcd[DP_DPCD_REV], rx_feature,
-				 msm_dp_panel->vsc_sdp_supported);
 		}
 	}
 	link_info = &msm_dp_panel->link_info;
