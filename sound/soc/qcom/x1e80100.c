@@ -39,22 +39,41 @@ static int x1e80100_snd_init(struct snd_soc_pcm_runtime *rtd)
 		/*
 		 * Set limit of -3 dB on Digital Volume and 0 dB on PA Volume
 		 * to reduce the risk of speaker damage until we have active
-		 * speaker protection in place.
-		 *
-		 * The Surface Pro 11 is raised to 0 dB (84) digital and +9 dB
-		 * (12) PA, the values the upstream UCM sequences for the WSA
-		 * macro and the wsa884x two-speaker profile request. Upstream's
-		 * cap left its speakers at roughly half the Windows loudness;
-		 * its amplifiers' OCP, PBR and thermal protection (the wsa884x
-		 * 2S/4 ohm profile) are relied on instead.
+		 * speaker protection in place. The Surface Pro 11 has that
+		 * protection (2S detection, 4-ohm OCP/PBR profile, fault
+		 * recovery), so it caps digital at 0 dB (84), the value the
+		 * upstream UCM sequences for the WSA macro request, and
+		 * leaves the PA ladder uncapped; see the block below.
 		 */
 		if (of_machine_is_compatible("microsoft,denali")) {
+			/*
+			 * No PA Volume cap on the Surface Pro 11. Speaker
+			 * protection is live there: the wsa884x amplifiers
+			 * detect their 2S supply strap and load the 4-ohm
+			 * OCP/PBR profile, with latched PA fault recovery.
+			 * The author and reviewer of the upstream limiting
+			 * series both asked for this cap to go once
+			 * protection existed, and it was removed on this
+			 * machine in 2026-08 for exactly that reason. The
+			 * amplifier operating point is staging owned by UCM,
+			 * which needs the full 0..31 ladder; a hard cap here
+			 * silently clamps it. Digital stays at 0 dB (84),
+			 * the value the upstream WSA macro init sequence
+			 * requests.
+			 */
 			digital_max = 84;
-			pa_max = 12;
-		} else {
-			digital_max = 81;
-			pa_max = 6;
+			snd_soc_limit_volume(card, "WSA WSA_RX0 Digital Volume", digital_max);
+			snd_soc_limit_volume(card, "WSA WSA_RX1 Digital Volume", digital_max);
+			snd_soc_limit_volume(card, "WSA2 WSA_RX0 Digital Volume", digital_max);
+			snd_soc_limit_volume(card, "WSA2 WSA_RX1 Digital Volume", digital_max);
+			break;
 		}
+		/*
+		 * Other X1E80100 machines keep the upstream limits: -3 dB
+		 * digital and 0 dB PA until their protection is proven.
+		 */
+		digital_max = 81;
+		pa_max = 6;
 		snd_soc_limit_volume(card, "WSA WSA_RX0 Digital Volume", digital_max);
 		snd_soc_limit_volume(card, "WSA WSA_RX1 Digital Volume", digital_max);
 		snd_soc_limit_volume(card, "WSA2 WSA_RX0 Digital Volume", digital_max);
