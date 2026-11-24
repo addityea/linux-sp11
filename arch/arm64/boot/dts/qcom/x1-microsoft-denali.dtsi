@@ -281,17 +281,6 @@
 		regulator-boot-on;
 	};
 
-	vreg_ts: regulator-ts {
-		compatible = "regulator-fixed";
-
-		regulator-name = "VREG_TS";
-
-		gpio = <&tlmm 64 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-
-		startup-delay-us = <10000>;
-	};
-
 	vph_pwr: regulator-vph-pwr {
 		compatible = "regulator-fixed";
 
@@ -1444,17 +1433,17 @@
 	status = "okay";
 
 	touchscreen@0 {
-		compatible = "microsoft,denali-touchscreen";
+		compatible = "microsoft,mshw0485";
 		reg = <0>;
 
-		interrupts-extended = <&tlmm 51 IRQ_TYPE_EDGE_FALLING>;
+		interrupts-extended = <&tlmm 51 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-gpios = <&tlmm 51 GPIO_ACTIVE_LOW>;
 		spi-max-frequency = <40000000>;
 		spi-rx-bus-width = <4>;
 		spi-tx-bus-width = <4>;
 
-		reset-gpios = <&tlmm 48 GPIO_ACTIVE_LOW>;
-
-		vdd-supply = <&vreg_ts>;
+		power-gpios = <&tlmm 64 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&tlmm 48 GPIO_ACTIVE_HIGH>;
 
 		pinctrl-0 = <&ts_int_n>, <&ts_reset_n>;
 		pinctrl-names = "default";
