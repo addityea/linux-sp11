@@ -1423,10 +1423,12 @@
 };
 
 &spi10 {
-	compatible = "qcom,geni-spi-qspi";
+	qcom,biosref-qspi;
+	qcom,enable-gsi-dma;
 
 	dmas = <&gpi_dma1 0 2 QCOM_GPI_QSPI>,
 	       <&gpi_dma1 1 2 QCOM_GPI_QSPI>;
+	dma-names = "tx", "rx";
 
 	pinctrl-0 = <&qup_spi10_data_clk>, <&qup_spi10_data23>, <&qup_spi10_cs>;
 
