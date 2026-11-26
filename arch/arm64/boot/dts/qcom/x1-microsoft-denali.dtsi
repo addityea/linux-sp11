@@ -1846,7 +1846,6 @@
 			      "dp1";
 
 		resets = <&gcc GCC_USB4_0_BCR>,
-			 <&gcc GCC_USB4_0_DP0_PHY_PRIM_BCR>,
 			 <&gcc GCC_USB4_0_MISC_USB4_SYS_BCR>,
 			 <&gcc GCC_USB4_0_MISC_RX_CLK_0_BCR>,
 			 <&gcc GCC_USB4_0_MISC_RX_CLK_1_BCR>,
@@ -1859,7 +1858,6 @@
 			 <&gcc GCC_USB4_0_MISC_DP0_MAX_PCLK_BCR>,
 			 <&gcc GCC_USB4_0_MISC_DP1_MAX_PCLK_BCR>;
 		reset-names = "core",
-			      "phy_nocsr",
 			      "sys",
 			      "rx0",
 			      "rx1",
