@@ -86,6 +86,18 @@ struct ps883x_retimer {
 static bool ps883x_should_disable_usb4(void)
 {
 	const char * const *compat;
+	static const struct of_device_id hr_matches[] = {
+		{ .compatible = "qcom,usb4-hr" },
+		{ },
+	};
+
+	/*
+	 * [sp11] A described USB4 host router means this machine carries the
+	 * platform support the quirk waits for; allow USB4 altmode then even
+	 * though the SoC is still listed below.
+	 */
+	if (of_find_matching_node(NULL, hr_matches))
+		return false;
 
 	for (compat = ps883x_disable_usb4_compats; *compat; compat++) {
 		if (of_machine_is_compatible(*compat))
