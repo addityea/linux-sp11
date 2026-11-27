@@ -52,6 +52,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -62,6 +63,7 @@
 #include <linux/of_address.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/property.h>
 #include <linux/reset.h>
 #include <linux/sizes.h>
@@ -517,26 +519,71 @@ static int qcom_usb4_hr_uc_bringup(struct qcom_usb4_hr *hr)
 			 "USB4 UC already running (autonomous boot); not halting\n");
 	} else {
 		/*
-		 * [sp11] Cold-boot experiment (2026-11-27). On Linux the UC is
-		 * never booted by platform firmware: arch1-3 first cold try saw
-		 * uc_ctl bit0 clear right after reset release. The Windows trace
-		 * only ever observed a warm UC, so no cold sequence is known.
-		 * Try the two proven Windows gate writes FIRST (they may hold
-		 * the UC off the ring), then poll: a UC booting from its own
-		 * flash may simply need time. Same writes, same registers; the
-		 * caller's unwind still owns cleanup on failure.
+		 * [sp11] Cold-boot experiment round 2 (2026-11-27). Round 1
+		 * (arch1-4) proved the UC does not come up on its own: gate
+		 * writes first + 5 s poll left uc_ctl = 0. The SP11 firmware's
+		 * own ACPI tables (aarch64-laptops DSDT dump, \_SB.UBF0) bind
+		 * the router's power to the power-engine provider (_DEP: PEP0)
+		 * - on Windows the block is powered through that provider, and
+		 * the QcUsb4Filter "(%s boot)" log shows the UC reports a cold
+		 * boot at that power-on. Emulate exactly that: power-cycle the
+		 * router's generic power domain, clear the two gates
+		 * immediately after power-on, then poll. No new register
+		 * writes; standard PM APIs only.
 		 */
+		int ret;
+
+		reset_control_bulk_assert(ARRAY_SIZE(hr->resets), hr->resets);
+		hr->resets_deasserted = false;
+		clk_bulk_disable_unprepare(ARRAY_SIZE(hr->clocks), hr->clocks);
+		hr->clocks_enabled = false;
+
+		ret = dev_pm_genpd_suspend(hr->nhi.dev);
+		if (ret)
+			dev_warn(hr->nhi.dev,
+				 "hr-bring: genpd suspend refused (%d), domain may stay powered\n",
+				 ret);
+		else
+			dev_info(hr->nhi.dev, "hr-bring: router domain powered off\n");
+
+		usleep_range(10000, 20000);
+
+		ret = dev_pm_genpd_resume(hr->nhi.dev);
+		if (ret)
+			dev_warn(hr->nhi.dev,
+				 "hr-bring: genpd resume failed (%d)\n", ret);
+		else
+			dev_info(hr->nhi.dev,
+				 "hr-bring: router domain powered on (UC cold-boot moment)\n");
+
+		ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
+		if (ret) {
+			dev_warn(hr->nhi.dev,
+				 "hr-bring: clocks back on failed (%d)\n", ret);
+			return -ENODEV;
+		}
+		hr->clocks_enabled = true;
+
+		ret = reset_control_bulk_deassert(ARRAY_SIZE(hr->resets), hr->resets);
+		if (ret) {
+			dev_warn(hr->nhi.dev,
+				 "hr-bring: resets deassert failed (%d)\n", ret);
+			return -ENODEV;
+		}
+		hr->resets_deasserted = true;
+
+		/* Gates reset on power-on; clear them right away, then poll. */
 		qcom_usb4_hr_rmw(hr->regs[3] + 0x64, 0, BIT(6));   /* port_group */
 		qcom_usb4_hr_rmw(hr->regs[1] + 0x18, 0, BIT(24));  /* router_config */
 		if (readl_poll_timeout(uc_ctl, val, val & BIT(0),
 				       250000, 5000000)) {
 			dev_warn(hr->nhi.dev,
-				 "hr-bring: UC not executing (uc_ctl=%#x after 5s poll); no host cold-boot sequence known\n",
+				 "hr-bring: UC not executing (uc_ctl=%#x) after domain power-cycle + 5s poll\n",
 				 val);
 			return -ENODEV;
 		}
 		dev_info(hr->nhi.dev,
-			 "hr-bring: UC booted cold after gate clear (uc_ctl=%#x)\n",
+			 "hr-bring: UC booted after domain power-cycle (uc_ctl=%#x)\n",
 			 val);
 	}
 	/* Clear the two gates, then release the UC. */
