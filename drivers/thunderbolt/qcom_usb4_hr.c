@@ -63,7 +63,7 @@
 #include <linux/of_address.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
-#include <linux/pm.h>
+#include <linux/pm_domain.h>
 #include <linux/property.h>
 #include <linux/reset.h>
 #include <linux/sizes.h>
@@ -538,23 +538,15 @@ static int qcom_usb4_hr_uc_bringup(struct qcom_usb4_hr *hr)
 		clk_bulk_disable_unprepare(ARRAY_SIZE(hr->clocks), hr->clocks);
 		hr->clocks_enabled = false;
 
-		ret = dev_pm_genpd_suspend(hr->nhi.dev);
-		if (ret)
-			dev_warn(hr->nhi.dev,
-				 "hr-bring: genpd suspend refused (%d), domain may stay powered\n",
-				 ret);
-		else
-			dev_info(hr->nhi.dev, "hr-bring: router domain powered off\n");
+		/* No MMIO access is permitted between suspend and resume. */
+		dev_pm_genpd_suspend(hr->nhi.dev);
+		dev_info(hr->nhi.dev, "hr-bring: router domain power-cycle requested\n");
 
 		usleep_range(10000, 20000);
 
-		ret = dev_pm_genpd_resume(hr->nhi.dev);
-		if (ret)
-			dev_warn(hr->nhi.dev,
-				 "hr-bring: genpd resume failed (%d)\n", ret);
-		else
-			dev_info(hr->nhi.dev,
-				 "hr-bring: router domain powered on (UC cold-boot moment)\n");
+		dev_pm_genpd_resume(hr->nhi.dev);
+		dev_info(hr->nhi.dev,
+			 "hr-bring: router domain powered back on (UC cold-boot moment)\n");
 
 		ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
 		if (ret) {
