@@ -650,108 +650,46 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 {
 	int ret;
 
-	if (hr->clocks_enabled) {
-		clk_bulk_disable_unprepare(ARRAY_SIZE(hr->clocks), hr->clocks);
-		hr->clocks_enabled = false;
-	}
-
 	/*
-	 * QCOM collapse contract: assert the domain's resets before pulling
-	 * its power. arch1-8/9 collapsed the domain with resets still
-	 * released and the GDSC never acknowledged power-on afterwards
-	 * (20/20 retries stuck): the FSM went into collapse mid-operation
-	 * and its restore handshake never completed.
-	 */
-	if (hr->resets_deasserted) {
-		ret = reset_control_bulk_assert(ARRAY_SIZE(hr->resets), hr->resets);
-		if (ret) {
-			dev_warn(dev, "hr-act: reset assert before collapse failed (%d)\n",
-				 ret);
-			return ret;
-		}
-		hr->resets_deasserted = false;
-	}
-	dev_info(dev, "hr-act: step2a resets asserted for collapse\n");
-
-	/*
-	 * Drop the single reference probe holds; the core then idle-suspends
-	 * synchronously (verified on arch1-6: count 0 => genpd powers the
-	 * domain down). put_sync returns 1 if suspend was refused.
-	 */
-	ret = pm_runtime_put_sync(dev);
-	if (ret > 0) {
-		dev_warn(dev, "hr-act: genpd power-off refused (%d)\n", ret);
-		pm_runtime_get_noresume(dev);
-		goto rel_reset;
-	}
-	if (ret < 0) {
-		dev_warn(dev, "hr-act: runtime suspend failed (%d)\n", ret);
-		pm_runtime_get_noresume(dev);
-		goto rel_reset;
-	}
-	dev_info(dev, "hr-act: step2b domain powered off (last vote gone)\n");
-
-	usleep_range(10000, 20000);
-
-	/*
-	 * arch1-11 verdict: clocks-before-power-up is impossible. The
-	 * clock core refuses branch-enable (-EBUSY) while the domain is
-	 * collapsed: those branch slices live behind the domain itself,
-	 * which is also the real root cause of the arch1-6/7 boot-time
-	 * EBUSY. Power-up must be requested with clocks down, exactly as
-	 * below; the clock re-enable belongs after step2c succeeds.
+	 * arch1-12 verdict: SW-collapse restore of GCC_USB4_0_GDSC is
+	 * dead. Registers at every give-up: gdscr=0x6822f800 (OFF acked,
+	 * SW_COLLAPSE cleared, ON-complete never set), cfg_gdscr=
+	 * 0x050e0000 static across 20 retries. The restore FSM waits for
+	 * an input Linux cannot produce (this corner's power-up is
+	 * AOP/RPMh-side on X1E). We are NOT collapsing the domain again.
 	 *
-	 * Retry the resume anyway: each attempt re-requests ON and buys
-	 * another poll window, and gdsc.c now dumps gdscr/cfg_gdscr on
-	 * every give-up so the handshake state is finally visible.
+	 * arch1-13 experiment: cold-boot the UC through its OWN reset
+	 * lines while the domain stays powered. The probe-holds' clocks
+	 * and the runtime PM reference are kept, so the domain, the
+	 * clocks and the GDSC are untouched; the UC is what gets pulsed.
+	 * Windows/PEP "power cycles" this corner at resume; holding the
+	 * router's resets asserted then released is the host-visible
+	 * half of that event without ever pulling GDSC power.
 	 */
-	{
-		int tries = 0;
-
-		for (;;) {
-			ret = pm_runtime_get_sync(dev);
-			if (ret >= 0)
-				break;
-			if (++tries >= 20) {
-				dev_warn(dev, "hr-act: genpd power-on failed (%d) after %d retries\n",
-					 ret, tries);
-				return ret;
-			}
-			dev_info(dev, "hr-act: step2c power-on attempt %d failed (%d), waiting\n",
-				 tries, ret);
-			usleep_range(250000, 300000);
-		}
+	if (!hr->resets_deasserted) {
+		dev_warn(dev, "hr-act: resets not held; cannot pulse\n");
+		return -EINVAL;
 	}
-	dev_info(dev, "hr-act: step2c domain powered on (UC cold-boot moment)\n");
 
-	/* Resets only come back once the domain is powered again. */
+	ret = reset_control_bulk_assert(ARRAY_SIZE(hr->resets), hr->resets);
+	if (ret) {
+		dev_warn(dev, "hr-act: reset pulse assert failed (%d)\n", ret);
+		return ret;
+	}
+	hr->resets_deasserted = false;
+	dev_info(dev, "hr-act: step2b UC held in reset (domain stays up)\n");
+
+	usleep_range(20000, 30000);
+
 	ret = reset_control_bulk_deassert(ARRAY_SIZE(hr->resets), hr->resets);
 	if (ret) {
-		dev_warn(dev, "hr-act: reset release after power-up failed (%d)\n",
-			 ret);
+		dev_warn(dev, "hr-act: reset pulse release failed (%d)\n", ret);
 		return ret;
 	}
 	hr->resets_deasserted = true;
+	dev_info(dev, "hr-act: step2c UC reset released (cold-boot moment)\n");
 
-	/* Clocks back on only after the domain is powered again. */
-	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
-	if (ret) {
-		dev_warn(dev,
-			 "hr-act: clocks after domain power cycle failed (%d)\n",
-			 ret);
-		return ret;
-	}
-	hr->clocks_enabled = true;
 	return 0;
-
-/*
- * Collapse never happened: restore the pre-cycle state (domain up,
- * resets released) so the device stays coherent.
- */
-rel_reset:
-	reset_control_bulk_deassert(ARRAY_SIZE(hr->resets), hr->resets);
-	hr->resets_deasserted = true;
-	return ret;
 }
 
 static int qcom_usb4_hr_activate(struct qcom_usb4_hr *hr,
