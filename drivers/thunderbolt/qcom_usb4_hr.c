@@ -734,11 +734,13 @@ static int qcom_usb4_hr_activate(struct qcom_usb4_hr *hr,
 	 * Self-heal: anything that force-suspended us between probe and
 	 * activation (system sleep, genpd unused sweep) is undone here
 	 * through the framework, so step1 clocks always run with the
-	 * domain actually powered.
+	 * domain actually powered. put_noidle brings the usage count back
+	 * to the single probe reference (status stays active).
 	 */
-	ret = pm_runtime_resume_device(dev);
+	ret = pm_runtime_resume_and_get(dev);
 	if (ret)
 		goto err_release;
+	pm_runtime_put_noidle(dev);
 
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
 	if (ret)
