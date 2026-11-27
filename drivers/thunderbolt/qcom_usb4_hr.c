@@ -730,6 +730,16 @@ static int qcom_usb4_hr_activate(struct qcom_usb4_hr *hr,
 	dev_info(dev, "hr-act: step0 activation entered%s\n",
 		 force ? " (sysfs)" : "");
 
+	/*
+	 * Self-heal: anything that force-suspended us between probe and
+	 * activation (system sleep, genpd unused sweep) is undone here
+	 * through the framework, so step1 clocks always run with the
+	 * domain actually powered.
+	 */
+	ret = pm_runtime_resume_device(dev);
+	if (ret)
+		goto err_release;
+
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
 	if (ret)
 		goto err_release;
@@ -1213,18 +1223,28 @@ static int qcom_usb4_hr_probe(struct platform_device *pdev)
 	 * [sp11] The router's power domain (gcc_usb4_0_gdsc via genpd) is
 	 * cycled deliberately in qcom_usb4_hr_domain_power_cycle(); enable
 	 * runtime PM so those calls are legal. No autosuspend: the domain
-	 * only moves when the driver asks. The domain is up now (boot +
-	 * genpd attach), hence set_active.
+	 * only moves when the driver asks.
 	 */
 	pm_runtime_enable(&pdev->dev);
-	pm_runtime_set_active(&pdev->dev);
 	/*
-	 * Hold one active reference ourselves: with count 0 the core
-	 * idle-suspends the device right after probe (arch1-6 saw the GDSC
-	 * power off and step1 clocks then fail with 'status stuck at off').
-	 * The domain only moves inside our explicit cycle from now on.
+	 * Do NOT claim the device is active: genpd_power_off_unused()
+	 * (late_initcall_sync) powers off domains whose consumers are RPM-
+	 * managed once this driver enables runtime PM, so the domain is
+	 * likely OFF by the time we get here (arch1-6/7: set_active was a
+	 * lie; activation then toggled branch clocks inside a dead domain,
+	 * 'status stuck at off' + EBUSY). Mark suspended and genuinely
+	 * resume through genpd so framework state matches hardware, and
+	 * hold that reference: the domain only moves again inside
+	 * qcom_usb4_hr_domain_power_cycle().
 	 */
-	pm_runtime_get_noresume(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
+	ret = pm_runtime_get_sync(&pdev->dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(&pdev->dev);
+		pm_runtime_disable(&pdev->dev);
+		return dev_err_probe(&pdev->dev, ret,
+				     "power-domain resume failed\n");
+	}
 
 	dev_info(&pdev->dev,
 		 hr->state == QCOM_USB4_HR_ACTIVE ?
