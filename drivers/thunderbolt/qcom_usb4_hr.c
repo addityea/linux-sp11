@@ -656,6 +656,24 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 	}
 
 	/*
+	 * QCOM collapse contract: assert the domain's resets before pulling
+	 * its power. arch1-8/9 collapsed the domain with resets still
+	 * released and the GDSC never acknowledged power-on afterwards
+	 * (20/20 retries stuck): the FSM went into collapse mid-operation
+	 * and its restore handshake never completed.
+	 */
+	if (hr->resets_deasserted) {
+		ret = reset_control_bulk_assert(ARRAY_SIZE(hr->resets), hr->resets);
+		if (ret) {
+			dev_warn(dev, "hr-act: reset assert before collapse failed (%d)\n",
+				 ret);
+			return ret;
+		}
+		hr->resets_deasserted = false;
+	}
+	dev_info(dev, "hr-act: step2a resets asserted for collapse\n");
+
+	/*
 	 * Drop the single reference probe holds; the core then idle-suspends
 	 * synchronously (verified on arch1-6: count 0 => genpd powers the
 	 * domain down). put_sync returns 1 if suspend was refused.
@@ -664,12 +682,12 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 	if (ret > 0) {
 		dev_warn(dev, "hr-act: genpd power-off refused (%d)\n", ret);
 		pm_runtime_get_noresume(dev);
-		return -EBUSY;
+		goto rel_reset;
 	}
 	if (ret < 0) {
 		dev_warn(dev, "hr-act: runtime suspend failed (%d)\n", ret);
 		pm_runtime_get_noresume(dev);
-		return ret;
+		goto rel_reset;
 	}
 	dev_info(dev, "hr-act: step2b domain powered off (last vote gone)\n");
 
@@ -703,6 +721,15 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 	}
 	dev_info(dev, "hr-act: step2c domain powered on (UC cold-boot moment)\n");
 
+	/* Resets only come back once the domain is powered again. */
+	ret = reset_control_bulk_deassert(ARRAY_SIZE(hr->resets), hr->resets);
+	if (ret) {
+		dev_warn(dev, "hr-act: reset release after power-up failed (%d)\n",
+			 ret);
+		return ret;
+	}
+	hr->resets_deasserted = true;
+
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
 	if (ret) {
 		dev_warn(dev,
@@ -712,6 +739,15 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 	}
 	hr->clocks_enabled = true;
 	return 0;
+
+/*
+ * Collapse never happened: restore the pre-cycle state (domain up,
+ * resets released) so the device stays coherent.
+ */
+rel_reset:
+	reset_control_bulk_deassert(ARRAY_SIZE(hr->resets), hr->resets);
+	hr->resets_deasserted = true;
+	return ret;
 }
 
 static int qcom_usb4_hr_activate(struct qcom_usb4_hr *hr,
