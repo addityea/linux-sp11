@@ -517,14 +517,27 @@ static int qcom_usb4_hr_uc_bringup(struct qcom_usb4_hr *hr)
 			 "USB4 UC already running (autonomous boot); not halting\n");
 	} else {
 		/*
-		 * Cold and not yet running: nothing the host can safely do
-		 * without a qualified firmware mechanism (there is none).
-		 * Report and fail activation; the caller's unwind removes
-		 * power, so the device is never left half-brought-up.
+		 * [sp11] Cold-boot experiment (2026-11-27). On Linux the UC is
+		 * never booted by platform firmware: arch1-3 first cold try saw
+		 * uc_ctl bit0 clear right after reset release. The Windows trace
+		 * only ever observed a warm UC, so no cold sequence is known.
+		 * Try the two proven Windows gate writes FIRST (they may hold
+		 * the UC off the ring), then poll: a UC booting from its own
+		 * flash may simply need time. Same writes, same registers; the
+		 * caller's unwind still owns cleanup on failure.
 		 */
-		dev_warn(hr->nhi.dev,
-			 "hr-bring: UC not executing and no host load path exists\n");
-		return -ENODEV;
+		qcom_usb4_hr_rmw(hr->regs[3] + 0x64, 0, BIT(6));   /* port_group */
+		qcom_usb4_hr_rmw(hr->regs[1] + 0x18, 0, BIT(24));  /* router_config */
+		if (readl_poll_timeout(uc_ctl, val, val & BIT(0),
+				       250000, 5000000)) {
+			dev_warn(hr->nhi.dev,
+				 "hr-bring: UC not executing (uc_ctl=%#x after 5s poll); no host cold-boot sequence known\n",
+				 val);
+			return -ENODEV;
+		}
+		dev_info(hr->nhi.dev,
+			 "hr-bring: UC booted cold after gate clear (uc_ctl=%#x)\n",
+			 val);
 	}
 	/* Clear the two gates, then release the UC. */
 	dev_info(hr->nhi.dev, "hr-bring: clearing port_group gate\n");
