@@ -189,7 +189,16 @@ static int gdsc_toggle_logic(struct gdsc *sc, enum gdsc_status status,
 	}
 
 	ret = gdsc_poll_status(sc, status);
-	WARN(ret, "%s status stuck at 'o%s'", sc->pd.name, status ? "ff" : "n");
+	if (ret) {
+		u32 cfg = 0, gdscr = 0;
+
+		regmap_read(sc->regmap, sc->gdscr, &gdscr);
+		if (sc->flags & POLL_CFG_GDSCR)
+			regmap_read(sc->regmap, sc->gdscr + CFG_GDSCR_OFFSET,
+				    &cfg);
+		WARN(1, "%s status stuck at 'o%s' (gdscr=%#x cfg_gdscr=%#x)",
+		     sc->pd.name, status ? "ff" : "n", gdscr, cfg);
+	}
 
 	if (!ret && status == GDSC_OFF) {
 		ret = icc_set_bw(sc->icc_path, 0, 0);

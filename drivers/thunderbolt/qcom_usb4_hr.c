@@ -694,13 +694,30 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 	usleep_range(10000, 20000);
 
 	/*
+	 * arch1-11 experiment: bring the interface clocks back BEFORE
+	 * requesting power-up. Every previous attempt requested ON while
+	 * every router clock was gated; if the GDSC restore state machine
+	 * needs clock ticks to finish and set CFG_GDSCR POWER_UP_COMPLETE,
+	 * that request could never complete. GCC itself is always-on, so
+	 * writing these branch registers over a collapsed domain is safe
+	 * (the domain's logic simply sees them when it wakes).
+	 */
+	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
+	if (ret) {
+		dev_warn(dev,
+			 "hr-act: clocks before domain power-up failed (%d)\n",
+			 ret);
+		return ret;
+	}
+	hr->clocks_enabled = true;
+	dev_info(dev, "hr-act: step2b2 clocks on before power-up\n");
+
+	/*
 	 * arch1-8 evidence: the OFF took effect and the GDSC ON-ack poll
 	 * timed out (gdsc.c:192 "status stuck at 'off'" + -ETIMEDOUT).
-	 * A cold router domain (UC re-booting) takes longer to acknowledge
-	 * power-on than gdsc_poll_status allows. Retry the resume: each
-	 * attempt re-requests ON and buys another poll window. A failed
-	 * pm_runtime_get_sync() in RPM_GET_PUT mode balances its own
-	 * reference, so no put on the failure paths here.
+	 * Retry the resume: each attempt re-requests ON and buys another
+	 * poll window. A failed pm_runtime_get_sync() in RPM_GET_PUT mode
+	 * balances its own reference, so no put on the failure paths here.
 	 */
 	{
 		int tries = 0;
@@ -729,15 +746,6 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 		return ret;
 	}
 	hr->resets_deasserted = true;
-
-	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
-	if (ret) {
-		dev_warn(dev,
-			 "hr-act: clocks after domain power cycle failed (%d)\n",
-			 ret);
-		return ret;
-	}
-	hr->clocks_enabled = true;
 	return 0;
 
 /*
