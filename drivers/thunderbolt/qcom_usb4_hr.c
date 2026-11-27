@@ -675,11 +675,31 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 
 	usleep_range(10000, 20000);
 
-	ret = pm_runtime_get_sync(dev);
-	if (ret < 0) {
-		dev_warn(dev, "hr-act: genpd power-on failed (%d)\n", ret);
-		pm_runtime_put_noidle(dev);
-		return ret;
+	/*
+	 * arch1-8 evidence: the OFF took effect and the GDSC ON-ack poll
+	 * timed out (gdsc.c:192 "status stuck at 'off'" + -ETIMEDOUT).
+	 * A cold router domain (UC re-booting) takes longer to acknowledge
+	 * power-on than gdsc_poll_status allows. Retry the resume: each
+	 * attempt re-requests ON and buys another poll window. A failed
+	 * pm_runtime_get_sync() in RPM_GET_PUT mode balances its own
+	 * reference, so no put on the failure paths here.
+	 */
+	{
+		int tries = 0;
+
+		for (;;) {
+			ret = pm_runtime_get_sync(dev);
+			if (ret >= 0)
+				break;
+			if (++tries >= 20) {
+				dev_warn(dev, "hr-act: genpd power-on failed (%d) after %d retries\n",
+					 ret, tries);
+				return ret;
+			}
+			dev_info(dev, "hr-act: step2c power-on attempt %d failed (%d), waiting\n",
+				 tries, ret);
+			usleep_range(250000, 300000);
+		}
 	}
 	dev_info(dev, "hr-act: step2c domain powered on (UC cold-boot moment)\n");
 
