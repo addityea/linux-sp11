@@ -1182,6 +1182,16 @@ static int qcom_usb4_hr_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	/*
+	 * arch1-14: read uc_ctl ONCE at probe, before any reset/clock/genpd
+	 * action ever runs. Every prior round only ever sampled uc_ctl after
+	 * we had already pulsed resets, so we never knew whether UEFI handed
+	 * the UC over already executing and we were killing it ourselves.
+	 * Read-only; no new MMIO region is touched.
+	 */
+	dev_info(&pdev->dev, "hr-probe: uc_ctl at boot=%#x (pre-touch)\n",
+		 readl(hr->regs[6] + 0x1000));
+
 	for (i = 0; i < ARRAY_SIZE(qcom_usb4_hr_clocks); i++)
 		hr->clocks[i].id = qcom_usb4_hr_clocks[i];
 
