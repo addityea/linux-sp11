@@ -639,10 +639,11 @@ static void qcom_usb4_hr_release_activation(struct qcom_usb4_hr *hr)
  * inconsistent (EBUSY on re-enable), so cycle through runtime PM instead:
  * at this point in activation no other consumer holds a GCC_USB4_0_*
  * reference (our clocks were the only ones, the QMP PHY is not yet
- * initialized), so pm_runtime_suspend() lets the genpd core power the
- * domain down cleanly (we are the only attached device), and
- * pm_runtime_resume() powers it back up with correct bookkeeping. The UC
- * restarts its boot at that edge.
+ * initialized), so pm_runtime_put_sync() on the single reference probe
+ * holds lets the core idle-suspend the device (genpd powers the domain
+ * down; arch1-6 proved this transition works), and pm_runtime_get_sync()
+ * powers it back up with correct bookkeeping. The UC restarts its boot at
+ * that edge.
  */
 static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 					   struct device *dev)
@@ -654,18 +655,30 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 		hr->clocks_enabled = false;
 	}
 
-	ret = pm_runtime_suspend(dev);
-	if (ret) {
+	/*
+	 * Drop the single reference probe holds; the core then idle-suspends
+	 * synchronously (verified on arch1-6: count 0 => genpd powers the
+	 * domain down). put_sync returns 1 if suspend was refused.
+	 */
+	ret = pm_runtime_put_sync(dev);
+	if (ret > 0) {
 		dev_warn(dev, "hr-act: genpd power-off refused (%d)\n", ret);
+		pm_runtime_get_noresume(dev);
+		return -EBUSY;
+	}
+	if (ret < 0) {
+		dev_warn(dev, "hr-act: runtime suspend failed (%d)\n", ret);
+		pm_runtime_get_noresume(dev);
 		return ret;
 	}
 	dev_info(dev, "hr-act: step2b domain powered off (last vote gone)\n");
 
 	usleep_range(10000, 20000);
 
-	ret = pm_runtime_resume(dev);
-	if (ret) {
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0) {
 		dev_warn(dev, "hr-act: genpd power-on failed (%d)\n", ret);
+		pm_runtime_put_noidle(dev);
 		return ret;
 	}
 	dev_info(dev, "hr-act: step2c domain powered on (UC cold-boot moment)\n");
@@ -1205,6 +1218,13 @@ static int qcom_usb4_hr_probe(struct platform_device *pdev)
 	 */
 	pm_runtime_enable(&pdev->dev);
 	pm_runtime_set_active(&pdev->dev);
+	/*
+	 * Hold one active reference ourselves: with count 0 the core
+	 * idle-suspends the device right after probe (arch1-6 saw the GDSC
+	 * power off and step1 clocks then fail with 'status stuck at off').
+	 * The domain only moves inside our explicit cycle from now on.
+	 */
+	pm_runtime_get_noresume(&pdev->dev);
 
 	dev_info(&pdev->dev,
 		 hr->state == QCOM_USB4_HR_ACTIVE ?
@@ -1228,7 +1248,8 @@ static void qcom_usb4_hr_remove(struct platform_device *pdev)
 	 */
 	qcom_usb4_hr_stop(hr);
 
-	/* [sp11] Undo the runtime PM hookup from probe. */
+	/* [sp11] Undo the runtime PM hookup from probe (drop our reference). */
+	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 }
