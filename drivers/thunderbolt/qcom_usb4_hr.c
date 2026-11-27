@@ -63,7 +63,7 @@
 #include <linux/of_address.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
-#include <linux/pm_domain.h>
+#include <linux/pm_runtime.h>
 #include <linux/property.h>
 #include <linux/reset.h>
 #include <linux/sizes.h>
@@ -519,63 +519,22 @@ static int qcom_usb4_hr_uc_bringup(struct qcom_usb4_hr *hr)
 			 "USB4 UC already running (autonomous boot); not halting\n");
 	} else {
 		/*
-		 * [sp11] Cold-boot experiment round 2 (2026-11-27). Round 1
-		 * (arch1-4) proved the UC does not come up on its own: gate
-		 * writes first + 5 s poll left uc_ctl = 0. The SP11 firmware's
-		 * own ACPI tables (aarch64-laptops DSDT dump, \_SB.UBF0) bind
-		 * the router's power to the power-engine provider (_DEP: PEP0)
-		 * - on Windows the block is powered through that provider, and
-		 * the QcUsb4Filter "(%s boot)" log shows the UC reports a cold
-		 * boot at that power-on. Emulate exactly that: power-cycle the
-		 * router's generic power domain, clear the two gates
-		 * immediately after power-on, then poll. No new register
-		 * writes; standard PM APIs only.
+		 * [sp11] Round 3 (2026-11-27): the domain power-cycle now runs
+		 * earlier, in qcom_usb4_hr_activate() step2a, at the one moment
+		 * this GDSC provably has no other consumers. What is left here
+		 * is the verdict: gates reset on domain power-on, so clear the
+		 * two known gates and poll for the UC.
 		 */
-		int ret;
-
-		reset_control_bulk_assert(ARRAY_SIZE(hr->resets), hr->resets);
-		hr->resets_deasserted = false;
-		clk_bulk_disable_unprepare(ARRAY_SIZE(hr->clocks), hr->clocks);
-		hr->clocks_enabled = false;
-
-		/* No MMIO access is permitted between suspend and resume. */
-		dev_pm_genpd_suspend(hr->nhi.dev);
-		dev_info(hr->nhi.dev, "hr-bring: router domain power-cycle requested\n");
-
-		usleep_range(10000, 20000);
-
-		dev_pm_genpd_resume(hr->nhi.dev);
-		dev_info(hr->nhi.dev,
-			 "hr-bring: router domain powered back on (UC cold-boot moment)\n");
-
-		ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
-		if (ret) {
-			dev_warn(hr->nhi.dev,
-				 "hr-bring: clocks back on failed (%d)\n", ret);
-			return -ENODEV;
-		}
-		hr->clocks_enabled = true;
-
-		ret = reset_control_bulk_deassert(ARRAY_SIZE(hr->resets), hr->resets);
-		if (ret) {
-			dev_warn(hr->nhi.dev,
-				 "hr-bring: resets deassert failed (%d)\n", ret);
-			return -ENODEV;
-		}
-		hr->resets_deasserted = true;
-
-		/* Gates reset on power-on; clear them right away, then poll. */
 		qcom_usb4_hr_rmw(hr->regs[3] + 0x64, 0, BIT(6));   /* port_group */
 		qcom_usb4_hr_rmw(hr->regs[1] + 0x18, 0, BIT(24));  /* router_config */
 		if (readl_poll_timeout(uc_ctl, val, val & BIT(0),
 				       250000, 5000000)) {
 			dev_warn(hr->nhi.dev,
-				 "hr-bring: UC not executing (uc_ctl=%#x) after domain power-cycle + 5s poll\n",
+				 "hr-bring: UC not executing (uc_ctl=%#x after 5s poll)\n",
 				 val);
 			return -ENODEV;
 		}
-		dev_info(hr->nhi.dev,
-			 "hr-bring: UC booted after domain power-cycle (uc_ctl=%#x)\n",
+		dev_info(hr->nhi.dev, "hr-bring: UC is executing (uc_ctl=%#x)\n",
 			 val);
 	}
 	/* Clear the two gates, then release the UC. */
@@ -670,6 +629,58 @@ static void qcom_usb4_hr_release_activation(struct qcom_usb4_hr *hr)
 	}
 }
 
+/*
+ * [sp11] Cold UC experiment, round 3 (2026-11-27). The SP11 ACPI tables bind
+ * the router to the power-engine provider (_DEP: PEP0 in \_SB.UBF0): Windows
+ * power-cycles the domain and the UC announces a cold boot at that power-on
+ * (QcUsb4Filter "(%s boot)" log, no host-side FW load). arch1-5 proved the
+ * syscore-oriented dev_pm_genpd_suspend/resume pair forces the domain OFF
+ * (UC cold-boot moment reached) but leaves the QCOM clock framework
+ * inconsistent (EBUSY on re-enable), so cycle through runtime PM instead:
+ * at this point in activation no other consumer holds a GCC_USB4_0_*
+ * reference (our clocks were the only ones, the QMP PHY is not yet
+ * initialized), so pm_runtime_suspend() lets the genpd core power the
+ * domain down cleanly (we are the only attached device), and
+ * pm_runtime_resume() powers it back up with correct bookkeeping. The UC
+ * restarts its boot at that edge.
+ */
+static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
+					   struct device *dev)
+{
+	int ret;
+
+	if (hr->clocks_enabled) {
+		clk_bulk_disable_unprepare(ARRAY_SIZE(hr->clocks), hr->clocks);
+		hr->clocks_enabled = false;
+	}
+
+	ret = pm_runtime_suspend(dev);
+	if (ret) {
+		dev_warn(dev, "hr-act: genpd power-off refused (%d)\n", ret);
+		return ret;
+	}
+	dev_info(dev, "hr-act: step2b domain powered off (last vote gone)\n");
+
+	usleep_range(10000, 20000);
+
+	ret = pm_runtime_resume(dev);
+	if (ret) {
+		dev_warn(dev, "hr-act: genpd power-on failed (%d)\n", ret);
+		return ret;
+	}
+	dev_info(dev, "hr-act: step2c domain powered on (UC cold-boot moment)\n");
+
+	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
+	if (ret) {
+		dev_warn(dev,
+			 "hr-act: clocks after domain power cycle failed (%d)\n",
+			 ret);
+		return ret;
+	}
+	hr->clocks_enabled = true;
+	return 0;
+}
+
 static int qcom_usb4_hr_activate(struct qcom_usb4_hr *hr,
 					struct platform_device *pdev, bool force)
 {
@@ -717,6 +728,21 @@ static int qcom_usb4_hr_activate(struct qcom_usb4_hr *hr,
 		goto err_release;
 	hr->resets_deasserted = true;
 	dev_info(dev, "hr-act: step2 resets deasserted\n");
+
+	/*
+	 * [sp11] If the UC is not executing, cycle the router power domain
+	 * now, before the PHY is engaged, while this GDSC provably has no
+	 * other consumers (see qcom_usb4_hr_domain_power_cycle). The uc_ctl
+	 * read needs our clocks, hence it sits after step1/step2.
+	 */
+	if (!(readl(hr->regs[6] + 0x1000) & BIT(0))) {
+		dev_info(dev, "hr-act: step2a UC down, cycling router domain\n");
+		ret = qcom_usb4_hr_domain_power_cycle(hr, dev);
+		if (ret)
+			goto err_release;
+		dev_info(dev, "hr-act: step2d uc_ctl after cycle=%#x\n",
+			 readl(hr->regs[6] + 0x1000));
+	}
 
 	dev_info(dev, "hr-act: step3 setting PHY mode TBT3\n");
 	ret = phy_set_mode_ext(hr->usb4_phy, PHY_MODE_TBT, PHY_SUBMODE_TBT3);
@@ -1170,6 +1196,16 @@ static int qcom_usb4_hr_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	/*
+	 * [sp11] The router's power domain (gcc_usb4_0_gdsc via genpd) is
+	 * cycled deliberately in qcom_usb4_hr_domain_power_cycle(); enable
+	 * runtime PM so those calls are legal. No autosuspend: the domain
+	 * only moves when the driver asks. The domain is up now (boot +
+	 * genpd attach), hence set_active.
+	 */
+	pm_runtime_enable(&pdev->dev);
+	pm_runtime_set_active(&pdev->dev);
+
 	dev_info(&pdev->dev,
 		 hr->state == QCOM_USB4_HR_ACTIVE ?
 		 "resource validation passed; host-router NHI is active\n" :
@@ -1191,6 +1227,10 @@ static void qcom_usb4_hr_remove(struct platform_device *pdev)
 	 * driver's own resources untouched.
 	 */
 	qcom_usb4_hr_stop(hr);
+
+	/* [sp11] Undo the runtime PM hookup from probe. */
+	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
 }
 
 static void qcom_usb4_hr_shutdown(struct platform_device *pdev)
