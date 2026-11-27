@@ -1819,10 +1819,19 @@
 			    "dpap1_aux",
 			    "dpap1_config";
 
+		/*
+		 * SP11 firmware contract (aarch64-laptops DSDT dump, \_SB.UBF0
+		 * PRT0 _CRS): GSI 504/611 level = ring/fw (matches CRD DT
+		 * SPI 472/579 with GSI = SPI + 32), and GSI 287, edge and
+		 * SharedAndWake, = the UC interrupt the frontend looks up as
+		 * "uc" (GSI 287 - 32 = SPI 255).
+		 */
 		interrupts = <GIC_SPI 472 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 579 IRQ_TYPE_LEVEL_HIGH>;
+			     <GIC_SPI 579 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 255 IRQ_TYPE_EDGE_RISING>;
 		interrupt-names = "ring",
-				  "fw";
+				  "fw",
+				  "uc";
 
 		clocks = <&gcc GCC_USB4_0_SYS_CLK>,
 			 <&gcc GCC_USB4_0_TMU_CLK>,
