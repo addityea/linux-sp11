@@ -704,6 +704,27 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 	usleep_range(3000000, 3100000);
 	dev_info(dev, "hr-act: post-off gdscr=%#x cfg=%#x\n",
 		 readl(gcc + 0x9f004), readl(gcc + 0x9f008));
+
+	/*
+	 * arch1-17: arch1-16 proved the clean edge completes (post-off
+	 * gdscr=0x22f801, a real off-ack) but the power-up request still
+	 * stalls, and the failure dump showed phy_sys parked at 2: the
+	 * phy-mux clock driver RE-PARKS the selector to 2 when we
+	 * unprepare the clocks, i.e. after the arch1-15 pre-edge poke. The mux must
+	 * read 0 at the moment the ON request is issued, so force it
+	 * here, on the clean-off domain, immediately before
+	 * pm_runtime_get_sync(). Vendor restart likewise does PCIe prep
+	 * first: the pcie_0 tunnel genpd (gcc_pcie_0_tunnel_gdsc,
+	 * gdscr 0xa0004) is powered and held by the tiny
+	 * qcom,x1e80100-usb4-tunnel-pd consumer below before we ask for
+	 * the router domain.
+	 */
+	writel(readl(gcc + 0x9f0e4) & ~0x3u, gcc + 0x9f0e4);
+	dev_info(dev, "hr-act: pre-on tunnels gdscr=%#x/%#x/%#x phy_sys=%#x bcr=%#x\n",
+		 readl(gcc + 0xa0004), readl(gcc + 0x2c004),
+		 readl(gcc + 0x13004), readl(gcc + 0x9f0e4),
+		 readl(gcc + 0xa0000));
+
 	ret = pm_runtime_get_sync(dev);
 	if (ret < 0) {
 		pm_runtime_put_noidle(dev);
@@ -1341,6 +1362,50 @@ static void qcom_usb4_hr_shutdown(struct platform_device *pdev)
 	qcom_usb4_hr_stop(hr);
 }
 
+/*
+ * arch1-17: gcc_pcie_0_tunnel_gdsc has no DT consumer on our tree, so
+ * Linux's genpd has it off from early boot (pm_genpd_summary: off-0 for
+ * all three tunnel domains), while UEFI had the tunnel powered at
+ * handoff. Vendor restart flows power the tunnel block before asking
+ * the router domain to come up. We cannot dev_pm_domain_attach_by_name()
+ * on the router itself (its first power-domain is already auto-attached
+ * and the API returns -EEXIST), so the DT carries a dedicated consumer
+ * node for the tunnel genpd; the driver core auto-attaches it and this
+ * probe powers the domain and holds the runtime PM reference for the
+ * lifetime of the boot. Failure to power it is logged, not fatal.
+ */
+static int usb4_tunnel_pd_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	int ret;
+
+	pm_runtime_enable(dev);
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(dev);
+		dev_warn(dev, "hr-pd: tunnel power-domain power-on failed (%d)\n",
+			 ret);
+	} else {
+		dev_info(dev, "hr-pd: tunnel power-domain powered up and held\n");
+	}
+	/* Built-in experiment consumer: reference intentionally held. */
+	return 0;
+}
+
+static const struct of_device_id usb4_tunnel_pd_of_match[] = {
+	{ .compatible = "qcom,x1e80100-usb4-tunnel-pd" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, usb4_tunnel_pd_of_match);
+
+static struct platform_driver usb4_tunnel_pd_driver = {
+	.probe = usb4_tunnel_pd_probe,
+	.driver = {
+		.name = "usb4-tunnel-pd",
+		.of_match_table = usb4_tunnel_pd_of_match,
+	},
+};
+
 static const struct of_device_id qcom_usb4_hr_of_match[] = {
 	{ .compatible = "qcom,x1e80100-usb4-hr" },
 	{ .compatible = "qcom,usb4-hr" },
@@ -1360,12 +1425,21 @@ static struct platform_driver qcom_usb4_hr_driver = {
 };
 int __init qcom_usb4_hr_register(void)
 {
-	return platform_driver_register(&qcom_usb4_hr_driver);
+	int ret;
+
+	ret = platform_driver_register(&usb4_tunnel_pd_driver);
+	if (ret)
+		return ret;
+	ret = platform_driver_register(&qcom_usb4_hr_driver);
+	if (ret)
+		platform_driver_unregister(&usb4_tunnel_pd_driver);
+	return ret;
 }
 
 void __exit qcom_usb4_hr_unregister(void)
 {
 	platform_driver_unregister(&qcom_usb4_hr_driver);
+	platform_driver_unregister(&usb4_tunnel_pd_driver);
 }
 
 MODULE_DESCRIPTION("Qualcomm X1E USB4 host-router bring-up scaffold");
