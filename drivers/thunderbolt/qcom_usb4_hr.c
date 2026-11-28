@@ -58,6 +58,7 @@
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/iopoll.h>
+#include <linux/firmware.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of_address.h>
@@ -67,6 +68,8 @@
 #include <linux/property.h>
 #include <linux/reset.h>
 #include <linux/sizes.h>
+#include <linux/soc/qcom/smem.h>
+#include <linux/soc/qcom/socinfo.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -493,6 +496,197 @@ MODULE_PARM_DESC(usbap_allow,
  * Windows drivers either.
  */
 
+
+/*
+ * === 2026-11-28 correction to the 2026-11-14 REA note above ===
+ * The claim "there is NO host-side firmware loading" is now REFUTED by
+ * direct evidence: (1) we hold the actual X1E80100 router MCU image,
+ * carved out of the Microsoft-published QcUsb4Filter8380.sys at 0x4b9c0
+ * (40,816 B, sha256 cd4f5929b51f2dbb0b583693ff8d024521c87f0d2e45c7adc142fed976650b99,
+ * records (0x0000, 7840 words) + (0x8000, 2360 words)); (2) the
+ * Glymur-series vendor-derived router driver shows the exact host load
+ * path (memcpy into the uc_ram aperture, DROM at ram+0xdf20, RUN bit at
+ * uc_per+0x1000). uc_ctl BIT(0) == 0 at every boot we ever observed is
+ * consistent with "nobody ever loaded the firmware", not with an
+ * autonomous boot. See evidence/usb4-hr-stage1-2026-11.md.
+ *
+ * arch1-18: first MCU bring-up attempt, minimal vendor sequence on top
+ * of an already clocked, domain-restored router. Legacy MCU layout
+ * offsets (absolute from the router root at 0x15600000):
+ *   RAM 0x13000        -> regs[5] "uc_ram"  (window 0x15613000, len 0xe000)
+ *   CTRL 0x22000       -> regs[6] "uc_per" (0x15621000) + 0x1000
+ *   mailbox CTRL+0xc, shared-offset reg CTRL+0x10
+ *   STATUS 0x18        -> regs[0] "router" + 0x18, BIT(24) = ready
+ *   HOST_CONTROL 0x8018-> regs[1] "router_config" + 0x18, BIT(24)
+ *   UID_HIGH/LOW 0x801c/0x8020 -> regs[1] + 0x1c / +0x20
+ * Deliberately NOT done yet (x1e offsets unconfirmed on our board):
+ * GCC rx-mux selects, CBCR mem-force, TCSR 0xb004, router 0x81000-pad
+ * pulses and the adapter timer writes. Add them only if READY never
+ * arrives here.
+ */
+#define UC_FW_NAME		"qcom/x1e80100/usb4-router-legacy.bin"
+#define UC_RAM_SIZE		0xdf20u /* stop before the DROM area */
+#define UC_DROM_OFFSET		0xdf20u
+#define UC_DROM_SIZE		116
+#define UC_MCU_READY		BIT(24)
+#define UC_MCU_RUN		BIT(0)
+#define UC_PRESET_CMD		(2U | (0x4421U << 8))
+
+/* Vendor DROM body: revision/length, legacy IDs, adapters, product strings. */
+static const u8 uc_drom_body[UC_DROM_SIZE - 13] = {
+	0x01, 0x67, 0x00, 0x28, 0x03, 0x00, 0x00, 0x00, 0x00, 0x05,
+	0x86, 0x00, 0x00, 0x00, 0x05, 0x87, 0x00, 0x00, 0x00, 0x1e,
+	0x01, 0x51, 0x75, 0x61, 0x6c, 0x63, 0x6f, 0x6d, 0x6d, 0x20,
+	0x54, 0x65, 0x63, 0x68, 0x6e, 0x6f, 0x6c, 0x6f, 0x67, 0x69,
+	0x65, 0x73, 0x2c, 0x20, 0x49, 0x6e, 0x63, 0x2e, 0x00, 0x11,
+	0x02, 0x53, 0x6e, 0x61, 0x70, 0x64, 0x72, 0x61, 0x67, 0x6f,
+	0x6e, 0x20, 0x30, 0x31, 0x42, 0x00, 0x0f, 0x09, 0x10, 0x04,
+	0xc6, 0x05, 0x38, 0x09, 0x00, 0x00, 0xeb, 0x34, 0x00, 0x00,
+	0x00, 0x08, 0x82, 0x80, 0x03, 0x00, 0x00, 0x00, 0x00, 0x08,
+	0x83, 0x90, 0x02, 0x00, 0x00, 0x00, 0x00, 0x03, 0x84, 0x00,
+	0x03, 0x08, 0x06,
+};
+
+static u8 uc_crc8(const u8 *data)
+{
+	u8 crc = 0xff;
+	unsigned int i, bit;
+
+	for (i = 0; i < 8; i++) {
+		crc ^= data[i];
+		for (bit = 0; bit < 8; bit++)
+			crc = (crc << 1) ^ ((crc & 0x80) ? 0x07 : 0);
+	}
+	return crc;
+}
+
+/* Table-less crc32c (Castagnoli, reflected), 103 bytes: cost irrelevant. */
+static u32 uc_crc32c(const u8 *data, size_t len)
+{
+	u32 crc = ~0U;
+	size_t i;
+	unsigned int bit;
+
+	for (i = 0; i < len; i++) {
+		crc ^= *data++;
+		for (bit = 0; bit < 8; bit++)
+			crc = (crc >> 1) ^ (0x82f63b78U & -(int)(crc & 1));
+	}
+	return ~crc;
+}
+
+static u32 uc_soc_serial(struct device *dev)
+{
+	struct socinfo *info;
+	size_t item_size = 0;
+	void *p;
+
+	p = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_HW_SW_BUILD_ID, &item_size);
+	if (IS_ERR(p) ||
+	    offsetofend(struct socinfo, serial_num) > item_size) {
+		dev_warn(dev, "hr-mcu: no SMEM serial (size %zu), using 0\n",
+			 item_size);
+		return 0;
+	}
+	info = p;
+	return le32_to_cpu(info->serial_num);
+}
+
+static int qcom_usb4_hr_uc_load(struct qcom_usb4_hr *hr, struct device *dev)
+{
+	const struct firmware *fw;
+	void __iomem *ram = hr->regs[5];
+	void __iomem *ctrl = hr->regs[6] + 0x1000;
+	void __iomem *status = hr->regs[0] + 0x18;
+	void __iomem *host_ctrl = hr->regs[1] + 0x18;
+	u8 drom[UC_DROM_SIZE];
+	u64 uid;
+	u32 serial, val, shared;
+	size_t pos = 0, n, fwsize;
+	int ret;
+
+	if (readl(ctrl) & UC_MCU_RUN) {
+		dev_info(dev, "hr-mcu: MCU already running (ctrl=%#x)\n",
+			 readl(ctrl));
+		return 0;
+	}
+
+	ret = request_firmware(&fw, UC_FW_NAME, dev);
+	if (ret)
+		return dev_err_probe(dev, ret, "hr-mcu: firmware %s not found\n",
+				     UC_FW_NAME);
+
+	/* Upload: zero control, then walk [addr, words, data] records. */
+	fwsize = fw->size;
+	writel(0, ctrl);
+	while (pos + 8 <= fw->size) {
+		u32 addr = get_unaligned_le32(fw->data + pos);
+		u32 words = get_unaligned_le32(fw->data + pos + 4);
+
+		if (!words || words > 0x8000 ||
+		    addr > UC_RAM_SIZE || words * 4 > UC_RAM_SIZE - addr ||
+		    pos + 8 + (size_t)words * 4 > fw->size) {
+			ret = -EPROTO;
+			break;
+		}
+		dev_info(dev, "hr-mcu: record addr=%#x words=%u\n", addr, words);
+		for (n = 0; n < words; n++)
+			writel(get_unaligned_le32(fw->data + pos + 8 + n * 4),
+			       ram + addr + n * 4);
+		pos += 8 + (size_t)words * 4;
+	}
+	if (ret || pos != fw->size) {
+		release_firmware(fw);
+		return dev_err_probe(dev, ret ? ret : -EPROTO,
+				     "hr-mcu: firmware records malformed at %zu\n",
+				     pos);
+	}
+	release_firmware(fw);
+	readl(ctrl); /* flush posted writes */
+
+	/* DROM: uid = 0x5c6:serial:router with crc8 and a crc32c over the body. */
+	serial = uc_soc_serial(dev);
+	uid = (0x5c6ULL << 48) | ((u64)serial << 4) | 0; /* router index 0 */
+	put_unaligned_le64(uid, drom + 1);
+	drom[0] = uc_crc8(drom + 1);
+	memcpy(drom + 13, uc_drom_body, sizeof(uc_drom_body));
+	put_unaligned_le32(uc_crc32c(drom + 13, sizeof(uc_drom_body)), drom + 9);
+
+	writel(get_unaligned_le32(drom + 5), hr->regs[1] + 0x1c);
+	writel(get_unaligned_le32(drom + 1), hr->regs[1] + 0x20);
+	for (n = 0; n < UC_DROM_SIZE; n += 4)
+		writel(get_unaligned_le32(drom + n), ram + UC_DROM_OFFSET + n);
+	readl(ctrl);
+	dev_info(dev, "hr-mcu: uploaded %zu B, drom uid=%#llx serial=%u\n",
+		 fwsize, uid, serial);
+
+	/* Start: clear ready, run, poll STATUS.BIT(24). */
+	qcom_usb4_hr_rmw(host_ctrl, 0, UC_MCU_READY);
+	qcom_usb4_hr_rmw(ctrl, UC_MCU_RUN, UC_MCU_RUN);
+	ret = readl_poll_timeout(status, val, val & UC_MCU_READY, 5000,
+				 1000000);
+	dev_info(dev, "hr-mcu: start poll status=%#x ctrl=%#x (%d)\n",
+		 val, readl(ctrl), ret);
+	if (ret) {
+		qcom_usb4_hr_rmw(ctrl, 0, UC_MCU_RUN);
+		qcom_usb4_hr_rmw(host_ctrl, 0, UC_MCU_READY);
+		return ret;
+	}
+
+	shared = readl(ctrl + 0x10);
+	if (shared % 4 || shared > UC_RAM_SIZE - 12) {
+		dev_warn(dev, "hr-mcu: shared offset implausible %#x\n", shared);
+		return -EPROTO;
+	}
+	dev_info(dev, "hr-mcu: MCU running, shared offset=%#x\n", shared);
+
+	/* Preset command via mailbox; MCU zeroes it when consumed. */
+	writel(UC_PRESET_CMD, ctrl + 0xc);
+	ret = readl_poll_timeout(ctrl + 0xc, val, !val, 1000, 1000000);
+	dev_info(dev, "hr-mcu: preset 0x4421 mailbox=%#x (%d)\n", val, ret);
+	return ret;
+}
+
 static int qcom_usb4_hr_uc_bringup(struct qcom_usb4_hr *hr)
 {
 	void __iomem *uc_ctl = hr->regs[6] + 0x1000; /* uc_per + 0x1000 */
@@ -844,6 +1038,14 @@ static int qcom_usb4_hr_activate(struct qcom_usb4_hr *hr,
 		goto err_release;
 	hr->phy_initialized = true;
 	dev_info(dev, "hr-act: step4 phy_init done\n");
+
+	if (!(readl(hr->regs[6] + 0x1000) & BIT(0))) {
+		dev_info(dev, "hr-act: step4b UC firmware load (MCU bring-up)\n");
+		ret = qcom_usb4_hr_uc_load(hr, dev);
+		if (ret)
+			goto err_release;
+		dev_info(dev, "hr-act: step4b MCU ready (fw loaded)\n");
+	}
 
 	ret = qcom_usb4_hr_uc_bringup(hr);
 	if (ret)
