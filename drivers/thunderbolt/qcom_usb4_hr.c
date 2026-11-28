@@ -648,46 +648,86 @@ static void qcom_usb4_hr_release_activation(struct qcom_usb4_hr *hr)
 static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 					   struct device *dev)
 {
+	void __iomem *gcc;
+	u32 val, sel, bcr;
 	int ret;
 
 	/*
-	 * arch1-12 verdict: SW-collapse restore of GCC_USB4_0_GDSC is
-	 * dead. Registers at every give-up: gdscr=0x6822f800 (OFF acked,
-	 * SW_COLLAPSE cleared, ON-complete never set), cfg_gdscr=
-	 * 0x050e0000 static across 20 retries. The restore FSM waits for
-	 * an input Linux cannot produce (this corner's power-up is
-	 * AOP/RPMh-side on X1E). We are NOT collapsing the domain again.
-	 *
-	 * arch1-13 experiment: cold-boot the UC through its OWN reset
-	 * lines while the domain stays powered. The probe-holds' clocks
-	 * and the runtime PM reference are kept, so the domain, the
-	 * clocks and the GDSC are untouched; the UC is what gets pulsed.
-	 * Windows/PEP "power cycles" this corner at resume; holding the
-	 * router's resets asserted then released is the host-visible
-	 * half of that event without ever pulling GDSC power.
+	 * arch1-15: the Yoga Slim 7x bring-up (same X1E80100 silicon)
+	 * published exactly our stuck signature (gdscr=0x6822f800,
+	 * cfg_gdscr=0x050e0000, "status stuck at 'off'", start -110) and
+	 * the two conditions under which the domain powers up again:
+	 *   1) GCC_PCIE_0_TUNNEL_BCR (GCC 0xa0000) is released, not held,
+	 *   2) the gcc_usb4_0_phy_sys_clk_src selector (GCC 0x9f0e4,
+	 *      bits [1:0]) reads input 0, not 2. The in-tree phy-mux clock
+	 *      driver parks this mux at 2 whenever the clock is off, and
+	 *      with 2 selected the GDSC ON handshake never completes.
+	 * Their recovered runs also kept the router's own resets released
+	 * across the power-off, so we no longer assert them here. We poke
+	 * both registers directly with the same field encodings the gcc
+	 * and reset drivers use; nothing in this DT consumes the tunnel
+	 * BCR or the mux, so there is no other owner to disturb.
 	 */
-	if (!hr->resets_deasserted) {
-		dev_warn(dev, "hr-act: resets not held; cannot pulse\n");
-		return -EINVAL;
+	gcc = ioremap(0x00100000, 0xb0000);	/* full GCC block */
+	if (!gcc)
+		return -ENOMEM;
+
+	bcr = readl(gcc + 0xa0000);
+	sel = readl(gcc + 0x9f0e4);
+	dev_info(dev, "hr-act: pre-edge gcc gdscr=%#x cfg=%#x phy_sys=%#x tunnel_bcr=%#x\n",
+		 readl(gcc + 0x9f004), readl(gcc + 0x9f008), sel, bcr);
+
+	if (bcr & BIT(0)) {
+		writel(0, gcc + 0xa0000);
+		dev_info(dev, "hr-act: tunnel BCR %#x -> released\n", bcr);
+	}
+	if (sel & 0x3) {
+		writel(sel & ~0x3u, gcc + 0x9f0e4);
+		dev_info(dev, "hr-act: phy_sys_clk_src selector %u -> 0\n",
+			 sel & 0x3);
 	}
 
-	ret = reset_control_bulk_assert(ARRAY_SIZE(hr->resets), hr->resets);
-	if (ret) {
-		dev_warn(dev, "hr-act: reset pulse assert failed (%d)\n", ret);
+	/*
+	 * Genuine edge: drop the last runtime-PM vote so the genpd core
+	 * powers the GDSC off, dwell, then ask for power again. Restores
+	 * must now complete; if they still do not, dump the same four
+	 * registers so the delta against the Yoga table is visible.
+	 */
+	pm_runtime_put_sync(dev);
+	usleep_range(3000000, 3100000);
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(dev);
+		dev_warn(dev, "hr-act: restore failed (%d) gdscr=%#x cfg=%#x phy_sys=%#x bcr=%#x\n",
+			 ret, readl(gcc + 0x9f004), readl(gcc + 0x9f008),
+			 readl(gcc + 0x9f0e4), readl(gcc + 0xa0000));
+		iounmap(gcc);
 		return ret;
 	}
-	hr->resets_deasserted = false;
-	dev_info(dev, "hr-act: step2b UC held in reset (domain stays up)\n");
+	dev_info(dev, "hr-act: domain restored gdscr=%#x cfg=%#x phy_sys=%#x\n",
+		 readl(gcc + 0x9f004), readl(gcc + 0x9f008),
+		 readl(gcc + 0x9f0e4));
+	iounmap(gcc);
 
-	usleep_range(20000, 30000);
-
-	ret = reset_control_bulk_deassert(ARRAY_SIZE(hr->resets), hr->resets);
+	/*
+	 * The domain collapse resets the interface-clock gate registers in
+	 * hardware even though the clock core still counts our bulk clocks
+	 * as enabled; rewrite them so the framework and the gates agree.
+	 */
+	clk_bulk_disable(ARRAY_SIZE(hr->clocks), hr->clocks);
+	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
 	if (ret) {
-		dev_warn(dev, "hr-act: reset pulse release failed (%d)\n", ret);
+		dev_warn(dev, "hr-act: clock re-enable after restore failed (%d)\n", ret);
 		return ret;
 	}
-	hr->resets_deasserted = true;
-	dev_info(dev, "hr-act: step2c UC reset released (cold-boot moment)\n");
+
+	/* On a clean edge the UC boots autonomously from its own storage. */
+	if (readl_poll_timeout(hr->regs[6] + 0x1000, val, val & BIT(0),
+			       250000, 8000000))
+		dev_warn(dev, "hr-act: UC still not executing after edge (uc_ctl=%#x)\n",
+			 val);
+	else
+		dev_info(dev, "hr-act: UC BOOTED (uc_ctl=%#x)\n", val);
 
 	return 0;
 }
