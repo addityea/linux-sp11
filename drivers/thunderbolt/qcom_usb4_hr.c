@@ -688,13 +688,22 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 	}
 
 	/*
-	 * Genuine edge: drop the last runtime-PM vote so the genpd core
-	 * powers the GDSC off, dwell, then ask for power again. Restores
-	 * must now complete; if they still do not, dump the same four
-	 * registers so the delta against the Yoga table is visible.
+	 * Clean-edge recipe (Yoga restart flow): the domain must go off
+	 * with NO loaded consumers. Their recovered runs drop every clock
+	 * and vote before power-off and never power-on with clocks enabled.
+	 * We currently hold ten prepared+enabled interface clocks at this
+	 * point, and this device shows the damage signature: cfg_gdscr
+	 * walks from 0x04070000 (healthy ON) to 0x050e0000 (bits 24/19 up,
+	 * 16 down) exactly across the forced collapse, then the ON
+	 * handshake never completes. Unprepare everything first.
 	 */
+	clk_bulk_disable(ARRAY_SIZE(hr->clocks), hr->clocks);
+	clk_bulk_unprepare(ARRAY_SIZE(hr->clocks), hr->clocks);
+
 	pm_runtime_put_sync(dev);
 	usleep_range(3000000, 3100000);
+	dev_info(dev, "hr-act: post-off gdscr=%#x cfg=%#x\n",
+		 readl(gcc + 0x9f004), readl(gcc + 0x9f008));
 	ret = pm_runtime_get_sync(dev);
 	if (ret < 0) {
 		pm_runtime_put_noidle(dev);
@@ -702,6 +711,7 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 			 ret, readl(gcc + 0x9f004), readl(gcc + 0x9f008),
 			 readl(gcc + 0x9f0e4), readl(gcc + 0xa0000));
 		iounmap(gcc);
+		/* Leave clocks unprepared on failure; teardown is idempotent. */
 		return ret;
 	}
 	dev_info(dev, "hr-act: domain restored gdscr=%#x cfg=%#x phy_sys=%#x\n",
@@ -709,12 +719,7 @@ static int qcom_usb4_hr_domain_power_cycle(struct qcom_usb4_hr *hr,
 		 readl(gcc + 0x9f0e4));
 	iounmap(gcc);
 
-	/*
-	 * The domain collapse resets the interface-clock gate registers in
-	 * hardware even though the clock core still counts our bulk clocks
-	 * as enabled; rewrite them so the framework and the gates agree.
-	 */
-	clk_bulk_disable(ARRAY_SIZE(hr->clocks), hr->clocks);
+	/* Re-acquire our clock references on the now-powered domain. */
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hr->clocks), hr->clocks);
 	if (ret) {
 		dev_warn(dev, "hr-act: clock re-enable after restore failed (%d)\n", ret);
