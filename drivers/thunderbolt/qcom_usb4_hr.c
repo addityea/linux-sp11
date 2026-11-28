@@ -693,12 +693,12 @@ static int qcom_usb4_hr_uc_bringup(struct qcom_usb4_hr *hr)
 	u32 val;
 
 	/*
-	 * 2026-11-14 REA evidence: the router boots autonomously; the host
-	 * NEVER loads firmware (no request_firmware path exists in the
-	 * Windows drivers either - the old experimental upload wrote into a
-	 * window that aliases host DRAM and is removed). The host-side job
-	 * is only to clear the two gates so the autonomously-booted UC
-	 * becomes ring-protocol reachable, and read version/capabilities.
+	 * Corrected 2026-11-28: the old 2026-11-14 REA note claiming the UC
+	 * boots autonomously is refuted. The MCU image rides inside the
+	 * vendor Windows driver (QcUsb4Filter8380.sys) and must be uploaded
+	 * by the host; uc_ctl BIT(0) reading 0 on every Linux boot simply
+	 * meant nobody ever loaded it. With qcom_usb4_hr_uc_load() run at
+	 * step4b, BIT(0) here is the post-load verdict.
 	 */
 	val = readl(uc_ctl);
 	dev_info(hr->nhi.dev, "hr-bring: uc_ctl status=%#x\n", val);
@@ -1019,12 +1019,35 @@ static int qcom_usb4_hr_activate(struct qcom_usb4_hr *hr,
 	 * read needs our clocks, hence it sits after step1/step2.
 	 */
 	if (!(readl(hr->regs[6] + 0x1000) & BIT(0))) {
-		dev_info(dev, "hr-act: step2a UC down, cycling router domain\n");
-		ret = qcom_usb4_hr_domain_power_cycle(hr, dev);
-		if (ret)
-			goto err_release;
-		dev_info(dev, "hr-act: step2d uc_ctl after cycle=%#x\n",
-			 readl(hr->regs[6] + 0x1000));
+		/*
+		 * [sp11 arch1-19] arch1-14..17 proved the domain cycle is a
+		 * dead lever: with a clean off-ack, phy_sys pinned to 0 and
+		 * the PCIe-0 tunnel genpd held ON, the GDSC ON handshake
+		 * still dies (-110). The vendor cold-start flow never
+		 * re-powers this domain either: it runs with the domain
+		 * still ON as firmware handed it over and boots the MCU
+		 * entirely in software (upload, DROM, RUN). So only cycle
+		 * if the domain is actually OFF; when it is ON, go
+		 * straight to the step4b software MCU boot.
+		 */
+		void __iomem *gcc = ioremap(0x00100000, 0xb0000);
+		bool domain_on = false;
+
+		if (gcc) {
+			/* gdscr BIT(0) is the collapse state: 0 = ON */
+			domain_on = !(readl(gcc + 0x9f004) & BIT(0));
+			iounmap(gcc);
+		}
+		if (domain_on) {
+			dev_info(dev, "hr-act: step2a UC down, domain ON: software MCU boot only\n");
+		} else {
+			dev_info(dev, "hr-act: step2a UC down, cycling router domain\n");
+			ret = qcom_usb4_hr_domain_power_cycle(hr, dev);
+			if (ret)
+				goto err_release;
+			dev_info(dev, "hr-act: step2d uc_ctl after cycle=%#x\n",
+				 readl(hr->regs[6] + 0x1000));
+		}
 	}
 
 	dev_info(dev, "hr-act: step3 setting PHY mode TBT3\n");
